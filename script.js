@@ -212,6 +212,32 @@ function buildGrid() {
   }
 }
 
+// 床・下球の斜面・下側の砂粒のどれかに支えられているときだけ休止できる。
+// 速度だけで休止させると、衝突補正で一時的に遅くなった粒が空中に固定されてしまう。
+function isParticleSupported(p) {
+  if (p.y < MID_Y) return false;
+  if (p.y >= BOTTOM_Y - p.r - 0.5) return true;
+
+  const leftGap = p.x - (leftBoundAt(p.y) + p.r);
+  const rightGap = (rightBoundAt(p.y) - p.r) - p.x;
+  if (leftGap <= 0.5 || rightGap <= 0.5) return true;
+
+  const cx = Math.min(gridCols - 1, Math.max(0, (p.x / cellSize) | 0));
+  const cy = Math.min(gridRows - 1, Math.max(0, (p.y / cellSize) | 0));
+  for (let gy = cy; gy <= Math.min(gridRows - 1, cy + 1); gy++) {
+    for (let gx = Math.max(0, cx - 1); gx <= Math.min(gridCols - 1, cx + 1); gx++) {
+      const cell = grid[gy * gridCols + gx];
+      for (let k = 0; k < cell.length; k++) {
+        const q = particles[cell[k]];
+        if (q === p || q.y <= p.y + p.r * 0.35) continue;
+        const contactDistance = p.r + q.r + 0.5;
+        if (Math.hypot(q.x - p.x, q.y - p.y) <= contactDistance) return true;
+      }
+    }
+  }
+  return false;
+}
+
 function resolvePair(a, b) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
@@ -338,8 +364,13 @@ function step(dt) {
   const wallFrictionFactor = Math.pow(WALL_FRICTION_PER_SECOND, subDt);
 
   for (let s = 0; s < SUBSTEPS; s++) {
+    buildGrid();
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
+      if (p.resting && !isParticleSupported(p)) {
+        p.resting = false;
+        p.restTimer = 0;
+      }
       p.previousX = p.x;
       p.previousY = p.y;
       if (!p.resting) {
@@ -370,11 +401,12 @@ function step(dt) {
     }
   }
 
-  // 一定時間ほぼ静止していた粒子を休止させる（衝突による目覚めは resolvePair 側で自然に発生する）
+  // 支えがある状態で一定時間ほぼ静止していた粒子だけを休止させる。
+  buildGrid();
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
     const speed2 = p.vx * p.vx + p.vy * p.vy;
-    if (speed2 < SLEEP_SPEED_THRESHOLD * SLEEP_SPEED_THRESHOLD) {
+    if (isParticleSupported(p) && speed2 < SLEEP_SPEED_THRESHOLD * SLEEP_SPEED_THRESHOLD) {
       p.restTimer += dt;
       if (p.restTimer > SLEEP_TIME_REQUIRED) {
         p.resting = true;

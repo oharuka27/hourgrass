@@ -22,6 +22,24 @@ new Function('document', 'performance', 'requestAnimationFrame', 'assert', sourc
   assert.ok(Math.hypot(a.x - b.x, a.y - b.y) >= 5.98,
     'Coincident sleeping particles must separate');
 
+  const airborne = new Particle(CENTER_X, TOP_Y + 80, PARTICLE_RADIUS);
+  particles = [airborne];
+  airborne.vx = airborne.vy = 0;
+  airborne.resting = true;
+  airborne.restTimer = SLEEP_TIME_REQUIRED;
+  step(1 / 60);
+  assert.equal(airborne.resting, false, 'An airborne particle must wake up');
+  assert.ok(airborne.vy > 0, 'Gravity must keep acting on an airborne particle');
+
+  airborne.y = MID_Y + 80;
+  airborne.vx = airborne.vy = 0;
+  airborne.resting = true;
+  airborne.restTimer = SLEEP_TIME_REQUIRED;
+  step(1 / 60);
+  assert.equal(airborne.resting, false, 'An unsupported particle in the lower bulb must wake up');
+  assert.ok(airborne.vy > 0, 'Gravity must act in the lower bulb too');
+  initParticles(500);
+
   for (const width of [12, 80, 28]) {
     neckWidthInput.value = String(width);
     neckWidthInput.input();
@@ -29,6 +47,8 @@ new Function('document', 'performance', 'requestAnimationFrame', 'assert', sourc
     assert.equal(neckWidthValue.textContent, String(width));
     for (let frame = 0; frame < 120; frame++) step(1 / 60);
     assert.equal(particles.length, 500);
+    assert.equal(particles.some(p => p.resting && !isParticleSupported(p)), false,
+      'Only supported particles may remain asleep');
     let maxOverlap = 0;
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
