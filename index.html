@@ -3,34 +3,43 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>砂時計 物理シミュレーション プロトタイプ</title>
+<meta name="theme-color" content="#f8f5ef">
+<title>砂と ひと息</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app">
-    <h1>砂時計 物理シミュレーション プロトタイプ</h1>
-
-    <canvas id="canvas" width="520" height="760"></canvas>
-
-    <div class="controls">
-      <label class="control-row">
-        粒子数
+  <main class="app">
+    <header class="heading">
+      <p class="eyebrow">わたしに戻る、小さな時間</p>
+      <h1>砂と ひと息<span aria-hidden="true">✳</span></h1>
+      <p class="intro">ゆっくり、じぶんのペースで。</p>
+    </header>
+    <section class="scene" aria-label="ディフューザーとリスのぬいぐるみを添えた砂時計">
+      <img class="scene-art" src="assets/quiet-corner.png" alt="透明なボトルに黒いスティックを挿したアロマディフューザーと、大きな茶色のしっぽのリスのぬいぐるみ" width="1536" height="1024">
+      <button class="hourglass" id="hourglassBtn" aria-label="砂時計の上下を入れ替える" aria-describedby="flipHint">
+        <canvas id="canvas" width="520" height="760">砂時計をひっくり返す</canvas>
+      </button>
+    </section>
+    <p class="flip-hint" id="flipHint"><span aria-hidden="true">↻</span> 砂時計をタップして、ひっくり返す</p>
+    <span id="flipStatus" class="sr-only" role="status"></span>
+    <section class="controls" aria-label="砂時計の設定">
+      <label class="control-row" for="particleCount">
+        <span>砂のつぶ</span>
         <input type="range" id="particleCount" min="200" max="5000" step="100" value="2000">
         <span id="particleCountValue">2000</span>
       </label>
-
-      <div class="control-row buttons">
-        <button id="resetBtn">リセット（粒子を再生成）</button>
-        <button id="flipBtn">反転（ひっくり返す）</button>
+      <div class="buttons">
+        <button id="resetBtn">もういちど <span aria-hidden="true">↺</span></button>
+        <button id="flipBtn">ひっくり返す <span aria-hidden="true">↻</span></button>
       </div>
-
-      <div class="stats">
-        <span id="fps">FPS: --</span>
-        <span id="particleActual">配置粒子数: --</span>
-      </div>
-    </div>
-  </div>
-
+      <p class="settings-note">つぶの数は「もういちど」で反映されます</p>
+      <details class="diagnostics">
+        <summary>シミュレーション情報</summary>
+        <div class="stats"><span id="fps">FPS: --</span><span id="particleActual">配置粒子数: --</span></div>
+      </details>
+    </section>
+    <footer>何もしない時間も、たいせつな時間。</footer>
+  </main>
   <script src="script.js"></script>
 </body>
 </html>

@@ -20,40 +20,26 @@ const MID_Y = (TOP_Y + BOTTOM_Y) / 2;
 const NECK_TOP_Y = MID_Y - NECK_HEIGHT / 2;
 const NECK_BOTTOM_Y = MID_Y + NECK_HEIGHT / 2;
 
-// 輪郭描画用の頂点（上ガラス球 -> ネック -> 下ガラス球）
-const OUTLINE_POINTS = [
-  { x: OUTER_LEFT, y: TOP_Y },
-  { x: OUTER_RIGHT, y: TOP_Y },
-  { x: CENTER_X + NECK_HALF_WIDTH, y: NECK_TOP_Y },
-  { x: CENTER_X + NECK_HALF_WIDTH, y: NECK_BOTTOM_Y },
-  { x: OUTER_RIGHT, y: BOTTOM_Y },
-  { x: OUTER_LEFT, y: BOTTOM_Y },
-  { x: CENTER_X - NECK_HALF_WIDTH, y: NECK_BOTTOM_Y },
-  { x: CENTER_X - NECK_HALF_WIDTH, y: NECK_TOP_Y },
-];
-
-// y座標を与えると、その高さでの砂時計内壁の左端/右端のx座標を返す。
-// 上下の球はテーパー状の台形、ネック部分は一定幅の通路として扱う。
+// 丸いガラスの描画と衝突判定には同じ境界を使う。
 function leftBoundAt(y) {
-  if (y <= NECK_TOP_Y) {
-    const t = (y - TOP_Y) / (NECK_TOP_Y - TOP_Y);
-    return OUTER_LEFT + t * (CENTER_X - NECK_HALF_WIDTH - OUTER_LEFT);
-  } else if (y >= NECK_BOTTOM_Y) {
-    const t = (y - NECK_BOTTOM_Y) / (BOTTOM_Y - NECK_BOTTOM_Y);
-    return (CENTER_X - NECK_HALF_WIDTH) + t * (OUTER_LEFT - (CENTER_X - NECK_HALF_WIDTH));
-  }
-  return CENTER_X - NECK_HALF_WIDTH;
+  const distance = Math.abs(y - MID_Y);
+  const t = Math.max(0, Math.min(1, (distance - NECK_HEIGHT / 2) / (NECK_TOP_Y - TOP_Y)));
+  const curve = (1 - Math.cos(Math.PI * t)) / 2;
+  return CENTER_X - NECK_HALF_WIDTH - (CENTER_X - NECK_HALF_WIDTH - OUTER_LEFT) * curve;
 }
 
 function rightBoundAt(y) {
-  if (y <= NECK_TOP_Y) {
-    const t = (y - TOP_Y) / (NECK_TOP_Y - TOP_Y);
-    return OUTER_RIGHT + t * (CENTER_X + NECK_HALF_WIDTH - OUTER_RIGHT);
-  } else if (y >= NECK_BOTTOM_Y) {
-    const t = (y - NECK_BOTTOM_Y) / (BOTTOM_Y - NECK_BOTTOM_Y);
-    return (CENTER_X + NECK_HALF_WIDTH) + t * (OUTER_RIGHT - (CENTER_X + NECK_HALF_WIDTH));
-  }
-  return CENTER_X + NECK_HALF_WIDTH;
+  return W - leftBoundAt(y);
+}
+
+function glassPath() {
+  ctx.beginPath();
+  ctx.moveTo(leftBoundAt(TOP_Y), TOP_Y);
+  ctx.lineTo(rightBoundAt(TOP_Y), TOP_Y);
+  for (let y = TOP_Y; y <= BOTTOM_Y; y += 2) ctx.lineTo(rightBoundAt(y), y);
+  ctx.lineTo(leftBoundAt(BOTTOM_Y), BOTTOM_Y);
+  for (let y = BOTTOM_Y; y >= TOP_Y; y -= 2) ctx.lineTo(leftBoundAt(y), y);
+  ctx.closePath();
 }
 
 // ------------------------------------------------------------------
@@ -91,7 +77,7 @@ const BASE_RADIUS = 3.2;
 const MIN_RADIUS = 1.3;
 const MAX_RADIUS = 4.5;
 
-const SAND_COLORS = ["#e0b872", "#d9a85c", "#c99a52", "#e8c68a", "#cf9f4f"];
+const SAND_COLORS = ["#d5ae70", "#e5c58c", "#c6a069", "#efdaa7", "#ddbb82"];
 
 let PARTICLE_RADIUS = BASE_RADIUS;
 let particles = [];
@@ -383,24 +369,36 @@ function step(dt) {
 function draw() {
   ctx.clearRect(0, 0, W, H);
 
-  // ガラスの輪郭
-  ctx.beginPath();
-  ctx.moveTo(OUTLINE_POINTS[0].x, OUTLINE_POINTS[0].y);
-  for (let i = 1; i < OUTLINE_POINTS.length; i++) {
-    ctx.lineTo(OUTLINE_POINTS[i].x, OUTLINE_POINTS[i].y);
-  }
-  ctx.closePath();
-  ctx.fillStyle = "rgba(138, 180, 214, 0.05)";
+  ctx.save();
+  ctx.translate(CENTER_X, MID_Y);
+  const turnScale = 1 - 0.4 * Math.sin(flipAngle);
+  ctx.scale(turnScale, turnScale);
+  ctx.rotate(flipAngle);
+  ctx.translate(-CENTER_X, -MID_Y);
+  glassPath();
+  const glass = ctx.createLinearGradient(OUTER_LEFT, 0, OUTER_RIGHT, 0);
+  glass.addColorStop(0, "rgba(255,255,255,.75)");
+  glass.addColorStop(.45, "rgba(255,255,255,.12)");
+  glass.addColorStop(1, "rgba(255,255,255,.65)");
+  ctx.fillStyle = glass;
   ctx.fill();
-  ctx.strokeStyle = "#8ab4d6";
-  ctx.lineWidth = 2.5;
+  ctx.strokeStyle = "#acbba1";
+  ctx.lineWidth = 3;
   ctx.stroke();
 
-  // 木製スタンド風の上下バー
-  ctx.fillStyle = "#6b4a30";
-  ctx.fillRect(OUTER_LEFT - 20, TOP_Y - 14, (OUTER_RIGHT - OUTER_LEFT) + 40, 10);
-  ctx.fillRect(OUTER_LEFT - 20, BOTTOM_Y + 4, (OUTER_RIGHT - OUTER_LEFT) + 40, 10);
-
+  for (const y of [TOP_Y - 23, BOTTOM_Y - 1]) {
+    ctx.beginPath();
+    ctx.roundRect(OUTER_LEFT - 18, y, OUTER_RIGHT - OUTER_LEFT + 36, 24, 12);
+    ctx.fillStyle = "#81916c";
+    ctx.fill();
+    ctx.beginPath();
+    ctx.roundRect(OUTER_LEFT - 12, y + 3, OUTER_RIGHT - OUTER_LEFT + 24, 6, 3);
+    ctx.fillStyle = "#a3b18d";
+    ctx.fill();
+  }
+  ctx.save();
+  glassPath();
+  ctx.clip();
   // 砂粒子
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
@@ -409,6 +407,19 @@ function draw() {
     ctx.fillStyle = p.color;
     ctx.fill();
   }
+  ctx.restore();
+  ctx.strokeStyle = "rgba(255,255,255,.8)";
+  ctx.lineWidth = 7;
+  ctx.lineCap = "round";
+  for (const start of [TOP_Y + 32, NECK_BOTTOM_Y + 110]) {
+    ctx.beginPath();
+    for (let y = start; y < start + 105; y += 2) {
+      const x = leftBoundAt(y) + 15;
+      if (y === start) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 // ------------------------------------------------------------------
@@ -423,7 +434,13 @@ function loop(now) {
   lastTime = now;
   dt = Math.min(dt, 1 / 30); // タブ切り替え等での大ジャンプを防ぐ
 
-  step(dt);
+  if (flipStarted !== null) {
+    const progress = Math.min(1, (now - flipStarted) / 650);
+    flipAngle = Math.PI * progress * progress * (3 - 2 * progress);
+    if (progress === 1) finishFlip();
+  } else {
+    step(dt);
+  }
   draw();
 
   const instFps = dt > 0 ? 1 / dt : 60;
@@ -446,11 +463,14 @@ particleCountInput.addEventListener("input", () => {
 });
 
 resetBtn.addEventListener("click", () => {
+  if (flipStarted !== null) finishFlip();
   initParticles(parseInt(particleCountInput.value, 10));
 });
 
-flipBtn.addEventListener("click", () => {
-  // 砂時計を180度回転させる = 各粒子を中心点about点対称に反転
+let flipStarted = null;
+let flipAngle = 0;
+function finishFlip() {
+  // 砂時計を180度回転させる = 各粒子を中心点に対して点対称に反転
   for (let i = 0; i < particles.length; i++) {
     const p = particles[i];
     p.x = W - p.x;
@@ -460,7 +480,22 @@ flipBtn.addEventListener("click", () => {
     p.resting = false; // 休止中の粒子も反転後は落下を再開させる
     p.restTimer = 0;
   }
-});
+  flipStarted = null;
+  flipAngle = 0;
+  document.getElementById("flipStatus").textContent = "砂時計の上下を入れ替えました";
+}
+
+function flipHourglass() {
+  if (flipStarted !== null) return;
+  document.getElementById("flipStatus").textContent = "";
+  if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+    finishFlip();
+  } else {
+    flipStarted = performance.now();
+  }
+}
+flipBtn.addEventListener("click", flipHourglass);
+document.getElementById("hourglassBtn").addEventListener("click", flipHourglass);
 
 // ------------------------------------------------------------------
 // 起動
