@@ -64,8 +64,27 @@ const SUBSTEPS = 4;
 const COLLISION_ITERATIONS = 2;
 const VELOCITY_DAMPING = 0.995;
 const RESTITUTION_PARTICLE = 0.15;
-const FRICTION_PARTICLE = 0.15;
+const FRICTION_PARTICLE = 0.5;
 const RESTITUTION_WALL = 0.25;
+// 壁に接触し続けた場合、1秒あたりに残る壁沿い方向速度の割合（0.5なら1秒でおよそ半分に減衰）
+const WALL_FRICTION_PER_SECOND = 0.5;
+
+// 粒子同士の相対速度がこれより小さい衝突は反発させず、運動量を吸収する（静止摩擦的な挙動）
+const REST_VELOCITY_THRESHOLD = 60; // px/s
+// これ未満のめり込みは位置補正しない（補正→再めり込みを繰り返す微振動ループを防ぐ）
+const POSITION_SLOP = 0.01; // px
+// 一度に補正する割合を抑え、深い山の中で補正が過剰になって粒子が弾き飛ばされるのを防ぐ
+const POSITION_CORRECTION_PERCENT = 0.4;
+
+// 一定時間ほぼ静止した粒子は「休止」させ、重力・自発的な移動を止める。
+// 積み重なった粒子の接触解決は反復回数が少ないと下からの支持力が上まで伝わりきらず、
+// 山全体がいつまでも小さく弾み続けてしまうため、静止した粒子を能動的に止めることで解決する。
+// ただし休止中も周囲の粒子からの衝突（位置補正・速度伝達）は通常どおり受けるため、
+// 強い衝撃（反転操作など）を受ければ自然に目を覚まして動き出す。
+const SLEEP_SPEED_THRESHOLD = 20; // px/s
+const SLEEP_TIME_REQUIRED = 0.3; // 秒
+// 休止中の粒子は、これを超える速さで近づいてくる衝突を受けたときだけ目を覚ます
+const WAKE_VELOCITY_THRESHOLD = 80; // px/s
 
 const REF_PARTICLE_COUNT = 2000;
 const BASE_RADIUS = 3.2;
@@ -89,6 +108,8 @@ class Particle {
     this.vy = 0;
     this.r = r;
     this.color = SAND_COLORS[(Math.random() * SAND_COLORS.length) | 0];
+    this.resting = false;
+    this.restTimer = 0;
   }
 }
 
@@ -140,15 +161,23 @@ function initParticles(requestedCount) {
 // ------------------------------------------------------------------
 // 壁との衝突（高さごとの左右境界にクランプする方式）
 // ------------------------------------------------------------------
-function containParticle(p) {
+// frictionFactor を渡したときだけ、壁沿い方向の速度に摩擦を適用する。
+// （1フレーム中に何度も呼ばれるため、摩擦は呼び出し側で1サブステップにつき1回だけ有効にする）
+function containParticle(p, frictionFactor) {
   const r = p.r;
 
   if (p.y < TOP_Y + r) {
     p.y = TOP_Y + r;
-    if (p.vy < 0) p.vy *= -RESTITUTION_WALL;
+    if (p.vy < 0) {
+      p.vy = -p.vy < REST_VELOCITY_THRESHOLD ? 0 : p.vy * -RESTITUTION_WALL;
+    }
+    if (frictionFactor !== undefined) p.vx *= frictionFactor;
   } else if (p.y > BOTTOM_Y - r) {
     p.y = BOTTOM_Y - r;
-    if (p.vy > 0) p.vy *= -RESTITUTION_WALL;
+    if (p.vy > 0) {
+      p.vy = p.vy < REST_VELOCITY_THRESHOLD ? 0 : p.vy * -RESTITUTION_WALL;
+    }
+    if (frictionFactor !== undefined) p.vx *= frictionFactor;
   }
 
   const lb = leftBoundAt(p.y) + r;
@@ -156,12 +185,18 @@ function containParticle(p) {
 
   if (p.x < lb) {
     p.x = lb;
-    if (p.vx < 0) p.vx *= -RESTITUTION_WALL;
+    if (p.vx < 0) {
+      p.vx = -p.vx < REST_VELOCITY_THRESHOLD ? 0 : p.vx * -RESTITUTION_WALL;
+    }
     p.vx += (Math.random() - 0.5) * 0.05;
+    if (frictionFactor !== undefined) p.vy *= frictionFactor;
   } else if (p.x > rb) {
     p.x = rb;
-    if (p.vx > 0) p.vx *= -RESTITUTION_WALL;
+    if (p.vx > 0) {
+      p.vx = p.vx < REST_VELOCITY_THRESHOLD ? 0 : p.vx * -RESTITUTION_WALL;
+    }
     p.vx += (Math.random() - 0.5) * 0.05;
+    if (frictionFactor !== undefined) p.vy *= frictionFactor;
   }
 }
 
@@ -197,31 +232,80 @@ function resolvePair(a, b) {
   const ny = dy / dist;
   const overlap = minDist - dist;
 
-  a.x -= nx * overlap * 0.5;
-  a.y -= ny * overlap * 0.5;
-  b.x += nx * overlap * 0.5;
-  b.y += ny * overlap * 0.5;
-
   const rvx = b.vx - a.vx;
   const rvy = b.vy - a.vy;
   const velAlongNormal = rvx * nx + rvy * ny;
+  const approachSpeed = -velAlongNormal; // 正なら近づいている
+
+  // 休止中の粒子は、強い衝撃を受けたときだけ目を覚まして通常どおり動けるようにする。
+  // （弱い接触のたびに毎回動かしてしまうと、いつまでも休止条件を満たせず山全体が
+  //   静止できなくなるため）
+  if (a.resting && approachSpeed > WAKE_VELOCITY_THRESHOLD) {
+    a.resting = false;
+    a.restTimer = 0;
+  }
+  if (b.resting && approachSpeed > WAKE_VELOCITY_THRESHOLD) {
+    b.resting = false;
+    b.restTimer = 0;
+  }
+
+  const aFixed = a.resting;
+  const bFixed = b.resting;
+  if (aFixed && bFixed) return; // 両方休止中なら何もしない（既に安定している）
+
+  // 微小なめり込みは補正しない（補正→再めり込みを繰り返す振動を防ぐ）
+  const correction = Math.max(overlap - POSITION_SLOP, 0) * POSITION_CORRECTION_PERCENT;
+  if (correction > 0) {
+    if (aFixed) {
+      b.x += nx * correction;
+      b.y += ny * correction;
+    } else if (bFixed) {
+      a.x -= nx * correction;
+      a.y -= ny * correction;
+    } else {
+      a.x -= nx * correction * 0.5;
+      a.y -= ny * correction * 0.5;
+      b.x += nx * correction * 0.5;
+      b.y += ny * correction * 0.5;
+    }
+  }
 
   if (velAlongNormal < 0) {
-    const jImpulse = (-(1 + RESTITUTION_PARTICLE) * velAlongNormal) / 2;
-    a.vx -= jImpulse * nx;
-    a.vy -= jImpulse * ny;
-    b.vx += jImpulse * nx;
-    b.vy += jImpulse * ny;
+    // ゆっくりとした接触（静止に近い状態）は反発させず、運動量を吸収して止める。
+    // これにより積み重なった粒子がいつまでも弾み続けるのを防ぐ。
+    const restitution = approachSpeed < REST_VELOCITY_THRESHOLD ? 0 : RESTITUTION_PARTICLE;
+    const totalImpulse = -(1 + restitution) * velAlongNormal;
+    if (aFixed) {
+      b.vx += totalImpulse * nx;
+      b.vy += totalImpulse * ny;
+    } else if (bFixed) {
+      a.vx -= totalImpulse * nx;
+      a.vy -= totalImpulse * ny;
+    } else {
+      const jImpulse = totalImpulse / 2;
+      a.vx -= jImpulse * nx;
+      a.vy -= jImpulse * ny;
+      b.vx += jImpulse * nx;
+      b.vy += jImpulse * ny;
+    }
   }
 
   const tx = -ny;
   const ty = nx;
   const rvt = (b.vx - a.vx) * tx + (b.vy - a.vy) * ty;
-  const frictionImpulse = rvt * FRICTION_PARTICLE * 0.5;
-  a.vx += tx * frictionImpulse;
-  a.vy += ty * frictionImpulse;
-  b.vx -= tx * frictionImpulse;
-  b.vy -= ty * frictionImpulse;
+  if (aFixed) {
+    b.vx -= tx * rvt * FRICTION_PARTICLE;
+    b.vy -= ty * rvt * FRICTION_PARTICLE;
+  } else if (bFixed) {
+    a.vx += tx * rvt * FRICTION_PARTICLE;
+    a.vy += ty * rvt * FRICTION_PARTICLE;
+  } else {
+    const frictionImpulse = rvt * FRICTION_PARTICLE * 0.5;
+    a.vx += tx * frictionImpulse;
+    a.vy += ty * frictionImpulse;
+    b.vx -= tx * frictionImpulse;
+    b.vy -= ty * frictionImpulse;
+  }
 }
 
 function resolveParticleCollisions() {
@@ -250,16 +334,19 @@ function resolveParticleCollisions() {
 // ------------------------------------------------------------------
 function step(dt) {
   const subDt = dt / SUBSTEPS;
+  const wallFrictionFactor = Math.pow(WALL_FRICTION_PER_SECOND, subDt);
 
   for (let s = 0; s < SUBSTEPS; s++) {
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
-      p.vy += GRAVITY * subDt;
-      p.vx *= VELOCITY_DAMPING;
-      p.vy *= VELOCITY_DAMPING;
-      p.x += p.vx * subDt;
-      p.y += p.vy * subDt;
-      containParticle(p);
+      if (!p.resting) {
+        p.vy += GRAVITY * subDt;
+        p.vx *= VELOCITY_DAMPING;
+        p.vy *= VELOCITY_DAMPING;
+        p.x += p.vx * subDt;
+        p.y += p.vy * subDt;
+      }
+      containParticle(p); // 位置補正のみ（摩擦はここでは適用しない）
     }
 
     buildGrid();
@@ -267,7 +354,25 @@ function step(dt) {
       resolveParticleCollisions();
     }
     for (let i = 0; i < particles.length; i++) {
-      containParticle(particles[i]);
+      // このサブステップで壁に接触している場合、ここで1回だけ摩擦を適用
+      containParticle(particles[i], wallFrictionFactor);
+    }
+  }
+
+  // 一定時間ほぼ静止していた粒子を休止させる（衝突による目覚めは resolvePair 側で自然に発生する）
+  for (let i = 0; i < particles.length; i++) {
+    const p = particles[i];
+    const speed2 = p.vx * p.vx + p.vy * p.vy;
+    if (speed2 < SLEEP_SPEED_THRESHOLD * SLEEP_SPEED_THRESHOLD) {
+      p.restTimer += dt;
+      if (p.restTimer > SLEEP_TIME_REQUIRED) {
+        p.resting = true;
+        p.vx = 0;
+        p.vy = 0;
+      }
+    } else {
+      p.restTimer = 0;
+      p.resting = false;
     }
   }
 }
@@ -352,6 +457,8 @@ flipBtn.addEventListener("click", () => {
     p.y = H - p.y;
     p.vx = -p.vx;
     p.vy = -p.vy;
+    p.resting = false; // 休止中の粒子も反転後は落下を再開させる
+    p.restTimer = 0;
   }
 });
 
