@@ -88,3 +88,6 @@ footer { margin-top: 26px; font-size: 15px; color: var(--muted); letter-spacing:
   .buttons button { font-size: 16px; }
   .control-row { gap: 12px; }
 }
+
+.neck-control { margin-top: 16px; }
+#neckWidthValue { min-width: 44px; font-variant-numeric: tabular-nums; }

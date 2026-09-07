@@ -14,7 +14,7 @@ const OUTER_RIGHT = W - MARGIN;
 const TOP_Y = 50;
 const BOTTOM_Y = H - 50;
 const CENTER_X = W / 2;
-const NECK_HALF_WIDTH = 14;
+let NECK_HALF_WIDTH = 14;
 const NECK_HEIGHT = 26;
 const MID_Y = (TOP_Y + BOTTOM_Y) / 2;
 const NECK_TOP_Y = MID_Y - NECK_HEIGHT / 2;
@@ -46,8 +46,8 @@ function glassPath() {
 // 物理パラメータ
 // ------------------------------------------------------------------
 const GRAVITY = 950; // px/s^2
-const SUBSTEPS = 4;
-const COLLISION_ITERATIONS = 2;
+const SUBSTEPS = 8;
+const COLLISION_ITERATIONS = 16;
 const VELOCITY_DAMPING = 0.995;
 const RESTITUTION_PARTICLE = 0.15;
 const FRICTION_PARTICLE = 0.5;
@@ -59,8 +59,8 @@ const WALL_FRICTION_PER_SECOND = 0.5;
 const REST_VELOCITY_THRESHOLD = 60; // px/s
 // これ未満のめり込みは位置補正しない（補正→再めり込みを繰り返す微振動ループを防ぐ）
 const POSITION_SLOP = 0.01; // px
-// 一度に補正する割合を抑え、深い山の中で補正が過剰になって粒子が弾き飛ばされるのを防ぐ
-const POSITION_CORRECTION_PERCENT = 0.4;
+// 接触ごとに重なりを解消する。補正後の位置から速度を求め、圧縮を蓄積させない。
+const POSITION_CORRECTION_PERCENT = 1;
 
 // 一定時間ほぼ静止した粒子は「休止」させ、重力・自発的な移動を止める。
 // 積み重なった粒子の接触解決は反復回数が少ないと下からの支持力が上まで伝わりきらず、
@@ -169,20 +169,26 @@ function containParticle(p, frictionFactor) {
   const lb = leftBoundAt(p.y) + r;
   const rb = rightBoundAt(p.y) - r;
 
-  if (p.x < lb) {
-    p.x = lb;
-    if (p.vx < 0) {
-      p.vx = -p.vx < REST_VELOCITY_THRESHOLD ? 0 : p.vx * -RESTITUTION_WALL;
+  if (p.x < lb || p.x > rb) {
+    const leftWall = p.x < lb;
+    const slope = (leftBoundAt(p.y + 0.1) - leftBoundAt(p.y - 0.1)) / 0.2;
+    const length = Math.hypot(1, slope);
+    const nx = (leftWall ? 1 : -1) / length;
+    const ny = -slope / length;
+    const penetration = (leftWall ? lb - p.x : p.x - rb) / length;
+    // 水平方向に押し込むと、くびれで粒が一列に圧縮される。
+    // 壁の法線方向へ戻し、斜面に沿って滑れるようにする。
+    p.x += nx * penetration;
+    p.y += ny * penetration;
+    const normalVelocity = p.vx * nx + p.vy * ny;
+    if (normalVelocity < 0) {
+      p.vx -= nx * normalVelocity;
+      p.vy -= ny * normalVelocity;
     }
-    p.vx += (Math.random() - 0.5) * 0.05;
-    if (frictionFactor !== undefined) p.vy *= frictionFactor;
-  } else if (p.x > rb) {
-    p.x = rb;
-    if (p.vx > 0) {
-      p.vx = p.vx < REST_VELOCITY_THRESHOLD ? 0 : p.vx * -RESTITUTION_WALL;
+    if (frictionFactor !== undefined) {
+      p.vx *= frictionFactor;
+      p.vy *= frictionFactor;
     }
-    p.vx += (Math.random() - 0.5) * 0.05;
-    if (frictionFactor !== undefined) p.vy *= frictionFactor;
   }
 }
 
@@ -209,13 +215,14 @@ function buildGrid() {
 function resolvePair(a, b) {
   const dx = b.x - a.x;
   const dy = b.y - a.y;
-  let dist = Math.hypot(dx, dy);
   const minDist = a.r + b.r;
-  if (dist >= minDist) return;
+  const distanceSquared = dx * dx + dy * dy;
+  if (distanceSquared >= minDist * minDist) return;
+  let dist = Math.sqrt(distanceSquared);
   if (dist < 1e-6) dist = 1e-6;
 
-  const nx = dx / dist;
-  const ny = dy / dist;
+  const nx = dist <= 1e-6 ? 1 : dx / dist;
+  const ny = dist <= 1e-6 ? 0 : dy / dist;
   const overlap = minDist - dist;
 
   const rvx = b.vx - a.vx;
@@ -237,7 +244,15 @@ function resolvePair(a, b) {
 
   const aFixed = a.resting;
   const bFixed = b.resting;
-  if (aFixed && bFixed) return; // 両方休止中なら何もしない（既に安定している）
+  if (aFixed && bFixed) {
+    // 休止状態でも重なったまま固定しない。
+    const correction = Math.max(overlap - POSITION_SLOP, 0) / 2;
+    a.x -= nx * correction;
+    a.y -= ny * correction;
+    b.x += nx * correction;
+    b.y += ny * correction;
+    return;
+  }
 
   // 微小なめり込みは補正しない（補正→再めり込みを繰り返す振動を防ぐ）
   const correction = Math.max(overlap - POSITION_SLOP, 0) * POSITION_CORRECTION_PERCENT;
@@ -325,6 +340,8 @@ function step(dt) {
   for (let s = 0; s < SUBSTEPS; s++) {
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
+      p.previousX = p.x;
+      p.previousY = p.y;
       if (!p.resting) {
         p.vy += GRAVITY * subDt;
         p.vx *= VELOCITY_DAMPING;
@@ -335,9 +352,17 @@ function step(dt) {
       containParticle(p); // 位置補正のみ（摩擦はここでは適用しない）
     }
 
-    buildGrid();
     for (let iter = 0; iter < COLLISION_ITERATIONS; iter++) {
+      // 位置補正で近傍が変わるため、各反復で探索用グリッドを更新する。
+      buildGrid();
       resolveParticleCollisions();
+      for (const p of particles) containParticle(p);
+    }
+    if (subDt > 0) {
+      for (const p of particles) {
+        p.vx = (p.x - p.previousX) / subDt;
+        p.vy = (p.y - p.previousY) / subDt;
+      }
     }
     for (let i = 0; i < particles.length; i++) {
       // このサブステップで壁に接触している場合、ここで1回だけ摩擦を適用
@@ -457,6 +482,35 @@ const particleCountInput = document.getElementById("particleCount");
 const particleCountValue = document.getElementById("particleCountValue");
 const resetBtn = document.getElementById("resetBtn");
 const flipBtn = document.getElementById("flipBtn");
+
+const neckWidthInput = document.getElementById("neckWidth");
+const neckWidthValue = document.getElementById("neckWidthValue");
+neckWidthInput.addEventListener("input", () => {
+  const oldWidth = NECK_HALF_WIDTH;
+  const newWidth = Number(neckWidthInput.value) / 2;
+  // 壁を一瞬で押し込まず、幅の中での相対位置を保って移す。
+  const oldBounds = particles.map(p => rightBoundAt(p.y) - CENTER_X - p.r);
+  NECK_HALF_WIDTH = newWidth;
+  particles.forEach((p, index) => {
+    const newBound = rightBoundAt(p.y) - CENTER_X - p.r;
+    if (oldWidth !== newWidth && oldBounds[index] > 0) {
+      p.x = CENTER_X + (p.x - CENTER_X) * newBound / oldBounds[index];
+    }
+    p.vx = 0;
+    p.vy = 0;
+    p.resting = false;
+    p.restTimer = 0;
+    containParticle(p);
+  });
+  // 幅の変更による重なりも、次の描画前に解消する。
+  for (let i = 0; i < COLLISION_ITERATIONS; i++) {
+    buildGrid();
+    resolveParticleCollisions();
+    for (const p of particles) containParticle(p);
+  }
+  neckWidthValue.textContent = neckWidthInput.value;
+  draw();
+});
 
 particleCountInput.addEventListener("input", () => {
   particleCountValue.textContent = particleCountInput.value;
